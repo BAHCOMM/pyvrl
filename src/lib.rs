@@ -1,17 +1,16 @@
+mod program;
 mod value;
 
 use pyo3::prelude::*;
 
 use pyo3::{
-    types::PyAny,
     exceptions::PyValueError,
     PyErr,
 };
 use std::collections::BTreeMap;
 use vrl::{
-    compiler::{state::RuntimeState, Context, TargetValue, TimeZone, Program, compile},
+    compiler::{runtime::Runtime, TargetValue, TimeZone, Program},
     value::{Secrets, Value},
-    diagnostic::Formatter,
 };
 
 use value::VrlValue;
@@ -29,41 +28,47 @@ impl Transform {
 
     #[new]
     fn __new__(source: String) -> PyResult<Self> {
-        let fns = vrl::stdlib::all();
-        let result = compile(&source, &fns)
-            .map_err(|d| {
-                PyErr::new::<PyValueError, _>(
-                    Formatter::new(&source, d).to_string()
-                )})?;
-        Ok(Self { source: source, program: result.program })
+        let program = program::compile_checked(&source)
+            .map_err(PyErr::new::<PyValueError, _>)?;
+        Ok(Self { source, program })
     }
 
-    fn remap(&mut self, py: Python, data: &PyAny) -> PyResult<Py<PyAny>> {
-        let vrl_value: VrlValue = data.extract()?;
+    fn remap(&mut self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let input = data.extract::<VrlValue>()?.inner;
 
+        // Everything that might recurse over a deep value runs on this stack,
+        // including dropping it. Nothing in here may call into Python.
+        let stack = value::stack_for_event(&input)?;
+        let output = stacker::maybe_grow(stack, stack, || self.run(input))?;
+
+        VrlValue::new(output).into_py_object(py)
+    }
+}
+
+impl Transform {
+    fn run(&self, input: Value) -> PyResult<Value> {
         let mut target = TargetValue {
-            value: vrl_value.inner,
+            value: input,
             metadata: Value::Object(BTreeMap::new()),
             secrets: Secrets::default(),
         };
 
         let timezone = TimeZone::default();
-        let mut state = RuntimeState::default();
-        let mut ctx = Context::new(&mut target, &mut state, &timezone);
+        let mut runtime = Runtime::default();
 
-        let resolution = self.program.resolve(&mut ctx)
-                                     .map_err(|e| {
-                                        PyErr::new::<PyValueError, _>(
-                                            format!("remap failure: {}", e))})?;
+        // Go through Runtime rather than Program::resolve: `return` surfaces
+        // as an error from the latter, and Runtime turns it back into a value.
+        let output = runtime.resolve(&mut target, &self.program, &timezone)
+                            .map_err(|e| {
+                                PyErr::new::<PyValueError, _>(
+                                    format!("remap failure: {}", e))})?;
 
-        let ret: VrlValue = VrlValue::new(resolution);
-
-        ret.into_py_object(py)
+        value::check_output_depth(output)
     }
 }
 
 #[pymodule]
-fn pyvrl(_py: Python, m: &PyModule) -> PyResult<()> {
+fn pyvrl(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Transform>()?;
     Ok(())
 }
