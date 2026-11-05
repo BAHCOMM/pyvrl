@@ -1,0 +1,17 @@
+{
+  "ec2_finding": {
+    "schemaVersion": "2.0", "accountId": "111122223333", "region": "us-east-1",
+    "id": "finding-1", "arn": "arn:aws:guardduty:us-east-1:111122223333:detector/d/finding/finding-1",
+    "type": "UnauthorizedAccess:EC2/SSHBruteForce", "title": "SSH brute force attacks",
+    "description": "EC2 instance is being probed.", "severity": 8.5,
+    "createdAt": "2026-03-04T05:06:07.000Z", "updatedAt": "2026-03-04T06:07:08.000Z",
+    "resource": {"resourceType": "Instance", "instanceDetails": {"instanceId": "i-0123456789abcdef0"}}
+  },
+  "s3_finding": {
+    "schemaVersion": "2.0", "accountId": "111122223333", "region": "us-east-1",
+    "id": "finding-2", "type": "Policy:S3/BucketBlockPublicAccessDisabled", "title": "Public access block removed",
+    "description": "A bucket lost its public access block.", "severity": 2,
+    "createdAt": "2026-03-04T05:06:07.000Z", "updatedAt": "2026-03-04T05:06:07.000Z",
+    "resource": {"resourceType": "S3Bucket"}
+  }
+}

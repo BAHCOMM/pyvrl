@@ -30,8 +30,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Install package and pytest
-        run: pip install . pytest
+      - name: Install package and test tools
+        run: pip install '.[test]'
       - name: Run tests
         run: python -m pytest tests
 
@@ -50,7 +50,7 @@ jobs:
         run: |
           python -m venv .venv
           source .venv/bin/activate
-          pip install maturin pytest
+          pip install maturin pytest jsonschema pyyaml
           eval "$(cargo llvm-cov show-env --export-prefix)"
           cargo llvm-cov clean --workspace
           maturin develop

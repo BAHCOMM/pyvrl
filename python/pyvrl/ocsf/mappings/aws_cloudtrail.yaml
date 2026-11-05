@@ -1,0 +1,119 @@
+# yaml-language-server: $schema=../../../../schemas/ocsf-mapping.schema.json
+source: aws_cloudtrail
+let:
+  operation: 'string(.eventName) ?? ""'
+  source_address: 'string(.sourceIPAddress) ?? ""'
+  # AWS services appear here by name, such as ec2.amazonaws.com, not by IP.
+  source_is_ip: 'is_ipv4(source_address) || is_ipv6(source_address)'
+  # IAM users have a name, roles have an issuer, and AWS services only have invokedBy.
+  user_name: >-
+    if .userIdentity.userName != null { .userIdentity.userName }
+    else if .userIdentity.sessionContext.sessionIssuer.userName != null { .userIdentity.sessionContext.sessionIssuer.userName }
+    else { .userIdentity.invokedBy }
+routes:
+  - when: .eventType == "AwsCloudTrailInsight"
+    class: detection_finding
+    profiles: [cloud]
+    fields:
+      activity_id: 'if .insightDetails.state == "End" { 3 } else { 1 }'
+      severity_id: 0
+      time: 'to_unix_timestamp(parse_timestamp!(.eventTime, "%+"), unit: "milliseconds")'
+      finding_info:
+        uid: .eventID
+        title: '"CloudTrail Insight: " + (string(.insightDetails.insightType) ?? "unknown")'
+        desc: .insightDetails.eventName
+        types: '[.insightDetails.insightType]'
+      cloud:
+        provider: '"AWS"'
+        region: .awsRegion
+        account:
+          uid: .recipientAccountId
+      metadata:
+        uid: .eventID
+        product:
+          name: '"CloudTrail"'
+          vendor_name: '"AWS"'
+      raw_data: encode_json(.)
+  - when: .eventName == "ConsoleLogin"
+    class: authentication
+    profiles: [cloud]
+    fields:
+      activity_id: 1
+      severity_id: 1
+      time: 'to_unix_timestamp(parse_timestamp!(.eventTime, "%+"), unit: "milliseconds")'
+      status_id: 'if .responseElements.ConsoleLogin == "Success" { 1 } else { 2 }'
+      status_detail: .errorMessage
+      is_mfa: .additionalEventData.MFAUsed == "Yes"
+      user:
+        name: user_name
+        uid: .userIdentity.principalId
+        type: .userIdentity.type
+        account:
+          uid: .userIdentity.accountId
+      service:
+        name: .eventSource
+      src_endpoint:
+        ip: 'if source_is_ip { source_address } else { null }'
+        svc_name: 'if source_is_ip { null } else { source_address }'
+      http_request:
+        user_agent: .userAgent
+      cloud:
+        provider: '"AWS"'
+        region: .awsRegion
+        account:
+          uid: .recipientAccountId
+      metadata:
+        uid: .eventID
+        product:
+          name: '"CloudTrail"'
+          vendor_name: '"AWS"'
+      raw_data: encode_json(.)
+  # Digest files and other non-events have no eventTime, so no route matches them.
+  - when: .eventTime != null && .eventName != null
+    class: api_activity
+    profiles: [cloud]
+    fields:
+      # The operation's verb comes first: older events have no readOnly field, and
+      # some services mark writes as read-only, such as API Gateway's DeleteRestApi.
+      activity_id: >-
+        if match(operation, r'^(Delete|Remove|Terminate)') { 4 }
+        else if match(operation, r'^(Create|Run)') { 1 }
+        else if .readOnly == true || match(operation, r'^(Describe|Get|List|Lookup|Head|Search|View|Check|Discover|BatchGet)') { 2 }
+        else if starts_with(operation, "Assume") { 99 }
+        else { 3 }
+      severity_id: 1
+      time: 'to_unix_timestamp(parse_timestamp!(.eventTime, "%+"), unit: "milliseconds")'
+      status_id: 'if .errorCode != null { 2 } else { 1 }'
+      status_code: .errorCode
+      status_detail: .errorMessage
+      actor:
+        application:
+          name: .userIdentity.invokedBy
+        user:
+          name: user_name
+          uid: .userIdentity.principalId
+          type: .userIdentity.type
+          account:
+            uid: .userIdentity.accountId
+      api:
+        operation: .eventName
+        service:
+          name: .eventSource
+        request:
+          uid: .requestID
+      src_endpoint:
+        ip: 'if source_is_ip { source_address } else { null }'
+        svc_name: 'if source_is_ip { null } else { source_address }'
+      http_request:
+        user_agent: .userAgent
+      cloud:
+        provider: '"AWS"'
+        region: .awsRegion
+        account:
+          uid: .recipientAccountId
+      metadata:
+        uid: .eventID
+        product:
+          name: '"CloudTrail"'
+          vendor_name: '"AWS"'
+      raw_data: encode_json(.)
