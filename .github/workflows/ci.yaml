@@ -35,6 +35,27 @@ jobs:
       - name: Run tests
         run: python -m pytest tests
 
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Install Rust coverage tools
+        run: rustup component add llvm-tools-preview
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Measure coverage and enforce the minimum
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          pip install maturin pytest
+          eval "$(cargo llvm-cov show-env --export-prefix)"
+          cargo llvm-cov clean --workspace
+          maturin develop
+          python -m pytest tests
+          cargo llvm-cov report --fail-under-lines 85 --fail-under-regions 85
+
   linux:
     runs-on: ${{ matrix.platform.runner }}
     strategy:
@@ -142,7 +163,7 @@ jobs:
     name: Release
     runs-on: ubuntu-latest
     if: "startsWith(github.ref, 'refs/tags/')"
-    needs: [test, linux, windows, macos, sdist]
+    needs: [test, coverage, linux, windows, macos, sdist]
     steps:
       - uses: actions/download-artifact@v4
       - name: Publish to PyPI

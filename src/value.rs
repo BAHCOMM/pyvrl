@@ -12,13 +12,80 @@ use vrl::prelude::*;
 /// interpreter. Matches serde_json's limit, and VRL's cap on `parse_json`.
 const MAX_DEPTH: usize = 128;
 
-fn check_depth(depth: usize) -> PyResult<()> {
-    if depth >= MAX_DEPTH {
-        return Err(PyRecursionError::new_err(format!(
-            "value is nested more than {MAX_DEPTH} levels deep"
+/// Largest event accepted, by `Measured::weight`. The stack we reserve grows
+/// with the event, so this bounds that reservation.
+#[cfg(target_pointer_width = "64")]
+const MAX_EVENT_WEIGHT: usize = 4 * 1024 * 1024;
+#[cfg(not(target_pointer_width = "64"))]
+const MAX_EVENT_WEIGHT: usize = 256 * 1024;
+
+/// Stack reserved for any event: running a program at the nesting limit.
+const BASE_STACK: usize = 256 * 1024;
+
+/// Stack reserved per unit of event weight. VRL functions such as `unflatten`,
+/// `parse_xml` and `set` build values as deep as their input, and those values
+/// are walked and dropped recursively, so depth scales with event size. The
+/// worst case measured is about 470 bytes (`compact` over `unflatten`); this
+/// doubles that. Unoptimized builds have much larger stack frames.
+const STACK_PER_WEIGHT: usize = if cfg!(debug_assertions) { 8192 } else { 1024 };
+
+fn too_deep() -> PyErr {
+    PyRecursionError::new_err(format!("value is nested more than {MAX_DEPTH} levels deep"))
+}
+
+struct Measured {
+    /// Containers nested inside each other at the deepest point.
+    depth: usize,
+    /// Approximate size: every value, plus the bytes of strings and keys.
+    weight: usize,
+}
+
+/// Measures a value of any depth. Uses a heap work list, not recursion, so this
+/// is safe on values too deep to walk normally.
+fn measure(value: &Value) -> Measured {
+    let mut measured = Measured { depth: 0, weight: 0 };
+    let mut pending = vec![(value, 0)];
+    while let Some((value, depth)) = pending.pop() {
+        measured.weight += 1;
+        match value {
+            Value::Array(arr) => {
+                measured.depth = measured.depth.max(depth + 1);
+                pending.extend(arr.iter().map(|item| (item, depth + 1)));
+            },
+            Value::Object(map) => {
+                measured.depth = measured.depth.max(depth + 1);
+                for (key, item) in map {
+                    measured.weight += key.len();
+                    pending.push((item, depth + 1));
+                }
+            },
+            Value::Bytes(b) => measured.weight += b.len(),
+            Value::String(s) => measured.weight += s.len(),
+            Value::Regex(_) | Value::Integer(_) | Value::Float(_) | Value::Boolean(_)
+            | Value::Timestamp(_) | Value::Null => {},
+        }
+    }
+    measured
+}
+
+/// Stack to reserve while running a program over `input`.
+pub fn stack_for_event(input: &Value) -> PyResult<usize> {
+    let weight = measure(input).weight;
+    if weight > MAX_EVENT_WEIGHT {
+        return Err(PyValueError::new_err(format!(
+            "event is too large: {weight} bytes, the limit is {MAX_EVENT_WEIGHT}"
         )));
     }
-    Ok(())
+    Ok(BASE_STACK + weight * STACK_PER_WEIGHT)
+}
+
+/// Rejects a program's output if it is too deep to convert to Python. Must run
+/// on the reserved stack, because the rejected value is dropped recursively.
+pub fn check_output_depth(value: Value) -> PyResult<Value> {
+    if measure(&value).depth > MAX_DEPTH {
+        return Err(too_deep());
+    }
+    Ok(value)
 }
 
 #[pyclass]
@@ -32,17 +99,17 @@ impl VrlValue {
     }
 
     pub fn into_py_object(self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        value_to_py(self.inner, py, 0)
+        value_to_py(self.inner, py)
     }
 }
 
-fn value_to_py(value: Value, py: Python<'_>, depth: usize) -> PyResult<Py<PyAny>> {
+/// Callers must pass values that have been through `check_output_depth`.
+fn value_to_py(value: Value, py: Python<'_>) -> PyResult<Py<PyAny>> {
     match value {
         Value::Array(arr) => {
-            check_depth(depth)?;
             let list = PyList::empty(py);
             for val in arr {
-                list.append(value_to_py(val, py, depth + 1)?)?;
+                list.append(value_to_py(val, py)?)?;
             }
             list.into_py_any(py)
         },
@@ -53,10 +120,9 @@ fn value_to_py(value: Value, py: Python<'_>, depth: usize) -> PyResult<Py<PyAny>
         Value::Integer(i) => i.into_py_any(py),
         Value::Null => Ok(py.None()),
         Value::Object(map) => {
-            check_depth(depth)?;
             let dict = PyDict::new(py);
             for (k, v) in map {
-                dict.set_item(k.as_str(), value_to_py(v, py, depth + 1)?)?;
+                dict.set_item(k.as_str(), value_to_py(v, py)?)?;
             }
             dict.into_py_any(py)
         },
@@ -81,7 +147,9 @@ fn value_from_py(ob: &Bound<'_, PyAny>, depth: usize) -> PyResult<Value> {
         "bool" => Value::Boolean(ob.extract::<bool>()?),
         "bytes" => Value::Bytes(ob.extract::<Vec<u8>>()?.into()),
         "dict" => {
-            check_depth(depth)?;
+            if depth >= MAX_DEPTH {
+                return Err(too_deep());
+            }
             let dict = ob.cast::<PyDict>()?;
             let mut map = BTreeMap::new();
             for (k, v) in dict.iter() {
@@ -96,7 +164,9 @@ fn value_from_py(ob: &Bound<'_, PyAny>, depth: usize) -> PyResult<Value> {
                                                 "Provided float value is NaN"))?),
         "int" => Value::Integer(ob.extract::<i64>()?),
         "list" => {
-            check_depth(depth)?;
+            if depth >= MAX_DEPTH {
+                return Err(too_deep());
+            }
             let list = ob.cast::<PyList>()?;
             let mut vec = Vec::new();
             for item in list.iter() {
