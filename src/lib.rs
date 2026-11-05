@@ -68,7 +68,7 @@ impl Transform {
 }
 
 #[pymodule]
-fn pyvrl(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _pyvrl(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Transform>()?;
     Ok(())
 }

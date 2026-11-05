@@ -1,0 +1,42 @@
+{
+  "console_login_success": {
+    "eventVersion": "1.08", "eventTime": "2026-03-04T05:06:07Z", "eventSource": "signin.amazonaws.com",
+    "eventName": "ConsoleLogin", "awsRegion": "us-east-1", "sourceIPAddress": "203.0.113.10",
+    "userAgent": "Mozilla/5.0", "eventID": "11111111-2222-3333-4444-555555555555",
+    "recipientAccountId": "111122223333",
+    "userIdentity": {"type": "IAMUser", "principalId": "AIDAEXAMPLE", "accountId": "111122223333", "userName": "alice"},
+    "responseElements": {"ConsoleLogin": "Success"},
+    "additionalEventData": {"MFAUsed": "Yes"}
+  },
+  "console_login_failure": {
+    "eventVersion": "1.08", "eventTime": "2026-03-04T05:06:07Z", "eventSource": "signin.amazonaws.com",
+    "eventName": "ConsoleLogin", "awsRegion": "us-east-1", "sourceIPAddress": "203.0.113.10",
+    "userAgent": "Mozilla/5.0", "eventID": "11111111-2222-3333-4444-666666666666",
+    "recipientAccountId": "111122223333", "errorMessage": "Failed authentication",
+    "userIdentity": {"type": "IAMUser", "accountId": "111122223333", "userName": "alice"},
+    "responseElements": {"ConsoleLogin": "Failure"},
+    "additionalEventData": {"MFAUsed": "No"}
+  },
+  "read_call": {
+    "eventVersion": "1.08", "eventTime": "2026-03-04T05:06:08Z", "eventSource": "s3.amazonaws.com",
+    "eventName": "ListBuckets", "awsRegion": "us-west-2", "sourceIPAddress": "2001:db8::1",
+    "userAgent": "aws-cli/2", "requestID": "REQ1", "eventID": "evt-read", "readOnly": true,
+    "recipientAccountId": "111122223333",
+    "userIdentity": {"type": "AssumedRole", "principalId": "AROAEXAMPLE:bob", "accountId": "111122223333",
+      "sessionContext": {"sessionIssuer": {"userName": "deploy-role"}}}
+  },
+  "denied_delete": {
+    "eventVersion": "1.08", "eventTime": "2026-03-04T05:06:09Z", "eventSource": "s3.amazonaws.com",
+    "eventName": "DeleteBucket", "awsRegion": "us-west-2", "sourceIPAddress": "203.0.113.11",
+    "userAgent": "aws-cli/2", "requestID": "REQ2", "eventID": "evt-delete", "readOnly": false,
+    "errorCode": "AccessDenied", "errorMessage": "Access Denied", "recipientAccountId": "111122223333",
+    "userIdentity": {"type": "IAMUser", "principalId": "AIDAEXAMPLE", "accountId": "111122223333", "userName": "alice"}
+  },
+  "service_call": {
+    "eventVersion": "1.08", "eventTime": "2026-03-04T05:06:10Z", "eventSource": "kms.amazonaws.com",
+    "eventName": "RotateKey", "awsRegion": "us-east-1", "sourceIPAddress": "kms.amazonaws.com",
+    "userAgent": "kms.amazonaws.com", "requestID": "REQ3", "eventID": "evt-service", "readOnly": false,
+    "recipientAccountId": "111122223333",
+    "userIdentity": {"type": "AWSService", "invokedBy": "kms.amazonaws.com"}
+  }
+}

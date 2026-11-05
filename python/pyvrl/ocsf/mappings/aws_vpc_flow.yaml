@@ -1,0 +1,46 @@
+# yaml-language-server: $schema=../../../../schemas/ocsf-mapping.schema.json
+# Each event is a record line in `.message`. Records use the default format unless
+# `.log_format` lists the columns, such as "version srcaddr dstaddr ...". Rows with
+# a NODATA or SKIPDATA status have no traffic to convert, so no route matches them.
+source: aws_vpc_flow
+let:
+  columns: 'split(string(.log_format) ?? "version account-id interface-id srcaddr dstaddr srcport dstport protocol packets bytes start end action log-status", " ")'
+  values: 'split(strip_whitespace(string(.message) ?? ""), " ")'
+  raw_flow: object_from_array(zip(columns, values))
+  # A dash means the column has no value for this record.
+  flow: 'map_values(raw_flow) -> |value| { if value == "-" { null } else { value } }'
+  # to_int turns null into 0, so numbers go through string first to stay missing.
+routes:
+  - when: 'length(columns) == length(values) && flow."log-status" == "OK"'
+    class: network_activity
+    profiles: [cloud, security_control]
+    fields:
+      activity_id: 6
+      severity_id: 1
+      action_id: 'if flow.action == "ACCEPT" { 1 } else if flow.action == "REJECT" { 2 } else { 0 }'
+      time: to_int!(string!(flow.end)) * 1000
+      start_time: to_int!(string!(flow.start)) * 1000
+      end_time: to_int!(string!(flow.end)) * 1000
+      src_endpoint:
+        ip: flow.srcaddr
+        port: to_int(string(flow.srcport) ?? "") ?? null
+        interface_uid: flow."interface-id"
+      dst_endpoint:
+        ip: flow.dstaddr
+        port: to_int(string(flow.dstport) ?? "") ?? null
+      connection_info:
+        direction_id: 'if flow."flow-direction" == "ingress" { 1 } else if flow."flow-direction" == "egress" { 2 } else { 0 }'
+        protocol_num: to_int(string(flow.protocol) ?? "") ?? null
+      traffic:
+        packets: to_int(string(flow.packets) ?? "") ?? null
+        bytes: to_int(string(flow.bytes) ?? "") ?? null
+      cloud:
+        provider: '"AWS"'
+        region: flow.region
+        account:
+          uid: flow."account-id"
+      metadata:
+        product:
+          name: '"VPC Flow Logs"'
+          vendor_name: '"AWS"'
+      raw_data: .message
