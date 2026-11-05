@@ -3,7 +3,6 @@ mod value;
 use pyo3::prelude::*;
 
 use pyo3::{
-    types::PyAny,
     exceptions::PyValueError,
     PyErr,
 };
@@ -38,7 +37,7 @@ impl Transform {
         Ok(Self { source: source, program: result.program })
     }
 
-    fn remap(&mut self, py: Python, data: &PyAny) -> PyResult<Py<PyAny>> {
+    fn remap(&mut self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let vrl_value: VrlValue = data.extract()?;
 
         let mut target = TargetValue {
@@ -63,7 +62,7 @@ impl Transform {
 }
 
 #[pymodule]
-fn pyvrl(_py: Python, m: &PyModule) -> PyResult<()> {
+fn pyvrl(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Transform>()?;
     Ok(())
 }
