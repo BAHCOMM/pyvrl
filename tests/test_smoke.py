@@ -74,3 +74,51 @@ def test_source_attr_and_reuse():
     t = Transform('.y = "z"\n.')
     assert t.source == '.y = "z"\n.'
     assert t.remap({}) == t.remap({}) == {"y": "z"}
+
+
+def nested(levels):
+    """A value made of `levels` nested lists."""
+    value = None
+    for _ in range(levels):
+        value = [value]
+    return value
+
+
+def test_return_stops_and_emits_value():
+    assert run('.a = 1\nreturn {"b": 2}\n.c = 3\n.') == {"b": 2}
+
+def test_return_in_conditional():
+    source = 'if .x == 1 { return "early" }\n"late"'
+    assert run(source, {"x": 1}) == "early"
+    assert run(source, {"x": 2}) == "late"
+
+def test_abort_still_raises():
+    with pytest.raises(ValueError, match="remap failure"):
+        run('abort "nope"')
+
+def test_max_depth_accepted():
+    assert run('.', nested(128)) == nested(128)
+
+def test_past_max_depth_rejected():
+    with pytest.raises(RecursionError):
+        run('.', nested(129))
+
+def test_very_deep_input_rejected():
+    with pytest.raises(RecursionError):
+        run('.', nested(100_000))
+
+def test_cyclic_list_rejected():
+    value = []
+    value.append(value)
+    with pytest.raises(RecursionError):
+        run('.', {"a": value})
+
+def test_cyclic_dict_rejected():
+    value = {}
+    value["self"] = value
+    with pytest.raises(RecursionError):
+        run('.', value)
+
+def test_program_cannot_nest_output_past_limit():
+    with pytest.raises(RecursionError):
+        run('. = [[.]]\n.', nested(128))

@@ -8,7 +8,7 @@ use pyo3::{
 };
 use std::collections::BTreeMap;
 use vrl::{
-    compiler::{state::RuntimeState, Context, TargetValue, TimeZone, Program, compile},
+    compiler::{runtime::Runtime, TargetValue, TimeZone, Program, compile},
     value::{Secrets, Value},
     diagnostic::Formatter,
 };
@@ -47,13 +47,14 @@ impl Transform {
         };
 
         let timezone = TimeZone::default();
-        let mut state = RuntimeState::default();
-        let mut ctx = Context::new(&mut target, &mut state, &timezone);
+        let mut runtime = Runtime::default();
 
-        let resolution = self.program.resolve(&mut ctx)
-                                     .map_err(|e| {
-                                        PyErr::new::<PyValueError, _>(
-                                            format!("remap failure: {}", e))})?;
+        // Go through Runtime rather than Program::resolve: `return` surfaces
+        // as an error from the latter, and Runtime turns it back into a value.
+        let resolution = runtime.resolve(&mut target, &self.program, &timezone)
+                                .map_err(|e| {
+                                    PyErr::new::<PyValueError, _>(
+                                        format!("remap failure: {}", e))})?;
 
         let ret: VrlValue = VrlValue::new(resolution);
 
