@@ -29,7 +29,7 @@ Apply the program to data with the object's `remap` function
 
 ## Converting logs to OCSF
 
-`pyvrl.ocsf` converts logs to [OCSF](https://schema.ocsf.io) 1.9.0 using YAML mappings. These are built in: `aws_cloudtrail`, `aws_guardduty` and `aws_vpc_flow`.
+`pyvrl.ocsf` converts logs to [OCSF](https://schema.ocsf.io) 1.9.0 using YAML mappings. These are built in: `auth0`, `aws_cloudtrail`, `aws_guardduty`, `aws_vpc_flow` and `azure_signin`.
 
 ```
 >>> from pyvrl.ocsf import Mapping

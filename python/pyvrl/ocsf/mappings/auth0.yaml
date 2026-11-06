@@ -1,0 +1,152 @@
+# yaml-language-server: $schema=../../../../schemas/ocsf-mapping.schema.json
+# Auth0 tenant logs, on their own or as `data` inside a log stream event. The
+# `type` code decides the class. Codes with no security meaning, such as system
+# updates and message delivery, have no route.
+source: auth0
+let:
+  event: 'if exists(.data) { .data } else { . }'
+  code: 'to_string(event.type) ?? ""'
+  # Some log pipelines rewrite dates without a time zone. They are always UTC.
+  parsed_date: 'parse_timestamp(event.date, "%+") ?? parse_timestamp(event.date, "%Y-%m-%d %H:%M:%S%.f", timezone: "UTC") ?? null'
+  # Auth0 starts failure codes with f.
+  failed: 'starts_with(code, "f") || includes(["gd_auth_failed", "gd_auth_rejected", "gd_recovery_failed", "gd_send_sms_failure", "gd_send_voice_failure"], code)'
+  logons: '["s", "f", "fc", "fco", "fcoa", "fens", "fp", "fu", "w", "scoa", "sens", "fsa", "ssa"]'
+  logoffs: '["slo", "flo"]'
+  # Exchanging a code or a credential for a token, such as seacft and fertft.
+  token_exchanges: >-
+    ["seacft", "seccft", "sede", "seoobft", "seotpft", "sepft", "sercft", "sertft",
+    "feacft", "feccft", "fede", "feoobft", "feotpft", "fepft", "fepotpft", "fercft", "ferrt", "fertft"]
+  mfa_steps: '["gd_auth_succeed", "gd_auth_failed", "gd_auth_rejected", "gd_recovery_succeed", "gd_recovery_failed", "mfar"]'
+  user_changes: >-
+    ["ss", "fs", "sui", "fui", "du", "sdu", "fdu", "scp", "fcp", "scpr", "fcpr", "sce", "fce", "scu", "fcu",
+    "scpn", "fcpn", "sv", "fv", "svr", "fvr", "ublkdu", "gd_start_enroll", "gd_enrollment_complete",
+    "gd_unenroll", "gd_update_device_account"]
+  api_calls: '["sapi", "fapi", "mgmt_api_read"]'
+  detections: >-
+    ["limit_wc", "limit_mu", "limit_sul", "limit_delegation", "api_limit", "pwd_leak", "signup_pwd_leak",
+    "reset_pwd_leak", "gd_otp_rate_limit_exceed", "gd_recovery_rate_limit_exceed"]
+  # OCSF needs a user name or ID, so "unknown" only appears when Auth0 gives neither.
+  identities: 'compact([event.user_name, event.client_name, event.user_id])'
+  user_name: 'if length(identities) == 0 { "unknown" } else { compact([event.user_name, event.client_name])[0] }'
+  method: 'upcase(to_string(event.details.request.method) ?? "")'
+routes:
+  - when: 'includes(logons, code) || includes(logoffs, code) || includes(token_exchanges, code) || includes(mfa_steps, code)'
+    class: authentication
+    fields:
+      activity_id: 'if includes(logons, code) { 1 } else if includes(logoffs, code) { 2 } else { 99 }'
+      activity_name: 'if includes(token_exchanges, code) { "Token Exchange" } else if includes(mfa_steps, code) { "MFA Challenge" } else { null }'
+      severity_id: 1
+      time: 'to_unix_timestamp!(parsed_date, unit: "milliseconds")'
+      status_id: 'if failed { 2 } else { 1 }'
+      status_code: code
+      status_detail: event.description
+      is_mfa: 'if includes(mfa_steps, code) { true } else { null }'
+      user:
+        name: user_name
+        uid: event.user_id
+        email_addr: 'if contains(to_string(event.user_name) ?? "", "@") { event.user_name } else { null }'
+      service:
+        name: 'compact([event.client_name, "Auth0"])[0]'
+        uid: event.client_id
+      src_endpoint:
+        ip: event.ip
+      http_request:
+        user_agent: event.user_agent
+      metadata:
+        uid: 'compact([.log_id, event.log_id, event._id])[0]'
+        tenant_uid: event.tenant_name
+        event_code: code
+        product:
+          name: '"Auth0"'
+          vendor_name: '"Okta"'
+      raw_data: encode_json(.)
+  - when: includes(user_changes, code)
+    class: user_management
+    fields:
+      activity_id: >-
+        if includes(["ss", "fs", "sui", "fui"], code) { 1 }
+        else if includes(["du", "sdu", "fdu"], code) { 3 }
+        else if includes(["scp", "fcp"], code) { 8 }
+        else if includes(["scpr", "fcpr"], code) { 9 }
+        else if code == "ublkdu" { 7 }
+        else if includes(["gd_start_enroll", "gd_enrollment_complete"], code) { 12 }
+        else if code == "gd_unenroll" { 13 }
+        else { 2 }
+      severity_id: 1
+      time: 'to_unix_timestamp!(parsed_date, unit: "milliseconds")'
+      status_id: 'if failed { 2 } else { 1 }'
+      status_code: code
+      status_detail: event.description
+      user:
+        name: user_name
+        uid: event.user_id
+        email_addr: 'if contains(to_string(event.user_name) ?? "", "@") { event.user_name } else { null }'
+      src_endpoint:
+        ip: event.ip
+      http_request:
+        user_agent: event.user_agent
+      metadata:
+        uid: 'compact([.log_id, event.log_id, event._id])[0]'
+        tenant_uid: event.tenant_name
+        event_code: code
+        product:
+          name: '"Auth0"'
+          vendor_name: '"Okta"'
+      raw_data: encode_json(.)
+  - when: includes(api_calls, code)
+    class: api_activity
+    fields:
+      activity_id: >-
+        if method == "GET" || code == "mgmt_api_read" { 2 }
+        else if method == "POST" { 1 }
+        else if method == "PATCH" || method == "PUT" { 3 }
+        else if method == "DELETE" { 4 }
+        else { 0 }
+      severity_id: 1
+      time: 'to_unix_timestamp!(parsed_date, unit: "milliseconds")'
+      status_id: 'if failed { 2 } else { 1 }'
+      status_code: code
+      status_detail: event.description
+      actor:
+        user:
+          name: user_name
+          uid: event.user_id
+      api:
+        operation: 'compact([event.description, event.details.request.path, code])[0]'
+      src_endpoint:
+        ip: event.ip
+      http_request:
+        user_agent: event.user_agent
+      metadata:
+        uid: 'compact([.log_id, event.log_id, event._id])[0]'
+        tenant_uid: event.tenant_name
+        event_code: code
+        product:
+          name: '"Auth0"'
+          vendor_name: '"Okta"'
+      raw_data: encode_json(.)
+  - when: includes(detections, code)
+    class: detection_finding
+    fields:
+      activity_id: 1
+      severity_id: 'if includes(["pwd_leak", "signup_pwd_leak", "reset_pwd_leak"], code) { 4 } else { 3 }'
+      time: 'to_unix_timestamp!(parsed_date, unit: "milliseconds")'
+      message: event.description
+      finding_info:
+        uid: 'compact([.log_id, event.log_id, event._id])[0]'
+        title: 'compact([event.description, code])[0]'
+        types: '[code]'
+      evidences:
+        - src_endpoint:
+            ip: event.ip
+          user:
+            name: user_name
+            uid: event.user_id
+      metadata:
+        uid: 'compact([.log_id, event.log_id, event._id])[0]'
+        tenant_uid: event.tenant_name
+        event_code: code
+        product:
+          name: '"Auth0"'
+          vendor_name: '"Okta"'
+      raw_data: encode_json(.)

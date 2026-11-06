@@ -1,0 +1,81 @@
+# yaml-language-server: $schema=../../../../schemas/ocsf-mapping.schema.json
+# Microsoft Entra ID sign-in logs from diagnostic settings: SignInLogs,
+# NonInteractiveUserSignInLogs, ServicePrincipalSignInLogs and
+# ManagedIdentitySignInLogs. Other categories have no route.
+source: azure_signin
+let:
+  p: .properties
+  # Exports differ: ISO 8601, the same without a zone, or a US date. All are UTC.
+  parsed_time: >-
+    parse_timestamp(.time, "%+") ?? parse_timestamp(.time, "%Y-%m-%d %H:%M:%S%.f", timezone: "UTC")
+    ?? parse_timestamp(.time, "%m/%d/%Y %-I:%M:%S %p", timezone: "UTC") ?? null
+  error_code: 'compact([to_string(p.status.errorCode) ?? "", to_string(.resultType) ?? ""])[0]'
+  succeeded: 'error_code == "0" || error_code == "Success"'
+  # Sign-ins that paused for a prompt, such as MFA or "stay signed in", not failures.
+  interrupted: 'includes(["50074", "50076", "50140"], error_code)'
+  protocol: 'to_string(p.authenticationProtocol) ?? ""'
+  address: 'compact([p.ipAddress, .callerIpAddress, .calleripaddress])[0]'
+  is_person: 'match(to_string(.category) ?? "", r''^(SignInLogs|NonInteractiveUserSignInLogs)$'')'
+  device_ids: 'compact([p.deviceDetail.deviceId, p.deviceDetail.displayName])'
+routes:
+  - when: '.properties != null && match(to_string(.category) ?? "", r''SignInLogs$'')'
+    class: authentication
+    profiles: [cloud, host]
+    fields:
+      activity_id: 1
+      # Entra ID's own risk rating for the sign-in.
+      severity_id: >-
+        if p.riskLevelDuringSignIn == "high" { 4 }
+        else if p.riskLevelDuringSignIn == "medium" { 3 }
+        else if p.riskLevelDuringSignIn == "low" { 2 }
+        else { 1 }
+      time: 'to_unix_timestamp!(parsed_time, unit: "milliseconds")'
+      status_id: 'if error_code == null { 0 } else if succeeded { 1 } else if interrupted { 99 } else { 2 }'
+      status: 'if interrupted { "Interrupted" } else { null }'
+      status_code: error_code
+      status_detail: 'compact([p.status.failureReason, p.status.additionalDetails])[0]'
+      is_mfa: 'if p.authenticationRequirement != null { p.authenticationRequirement == "multiFactorAuthentication" } else { null }'
+      logon_type_id: 'if p.isInteractive == true { 2 } else { 99 }'
+      logon_type: .category
+      auth_protocol: 'if protocol == "none" { null } else { p.authenticationProtocol }'
+      auth_protocol_id: >-
+        if match(protocol, r'(?i)^(oauth2|ropc|rpoc|devicecode)$') { 6 }
+        else if match(protocol, r'(?i)^saml') { 5 }
+        else if protocol == "" || protocol == "none" { 0 }
+        else { 99 }
+      user:
+        # Service principals and managed identities have no user of their own.
+        name: 'compact([p.userPrincipalName, p.userDisplayName, p.servicePrincipalName, p.appDisplayName, p.resourceDisplayName])[0]'
+        uid: 'compact([p.userId, p.servicePrincipalId, p.appId])[0]'
+        type_id: 'if is_person { 1 } else { 4 }'
+        account:
+          uid: .tenantId
+      service:
+        name: 'compact([p.resourceDisplayName, p.appDisplayName, "Microsoft Entra ID"])[0]'
+        uid: p.resourceId
+      src_endpoint:
+        ip: address
+        # OCSF endpoints need an address, so a location can't stand alone.
+        location:
+          city: 'if address != null { p.location.city } else { null }'
+          region: 'if address != null { p.location.state } else { null }'
+          country: 'if address != null { p.location.countryOrRegion } else { null }'
+      device: >-
+        if length(device_ids) > 0 {
+          {"type_id": 0, "uid": p.deviceDetail.deviceId, "name": p.deviceDetail.displayName,
+           "is_compliant": p.deviceDetail.isCompliant, "is_managed": p.deviceDetail.isManaged}
+        } else { null }
+      http_request:
+        user_agent: p.userAgent
+      cloud:
+        provider: '"Azure"'
+        account:
+          uid: .tenantId
+      metadata:
+        uid: p.id
+        correlation_uid: 'compact([.correlationId, .correlationid, p.correlationId])[0]'
+        log_name: .category
+        product:
+          name: '"Microsoft Entra ID"'
+          vendor_name: '"Microsoft"'
+      raw_data: encode_json(.)

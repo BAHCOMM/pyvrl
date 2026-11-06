@@ -1,5 +1,8 @@
 import json
 import logging
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import jsonschema
@@ -74,6 +77,11 @@ def test_type_uid_follows_activity_expression():
 
 def test_null_fields_are_dropped():
     event = Mapping(document(status_detail=".missing", src_endpoint={"ip": ".missing"})).convert({})
+    assert "status_detail" not in event
+    assert "src_endpoint" not in event
+
+def test_empty_strings_are_dropped():
+    event = Mapping(document(status_detail='""', src_endpoint={"ip": '""'}), on_invalid="raise").convert({})
     assert "status_detail" not in event
     assert "src_endpoint" not in event
 
@@ -438,6 +446,221 @@ def test_guardduty_severity_bands(score, severity):
     mapping = Mapping.builtin("aws_guardduty", on_invalid="raise")
     finding = {**fixture("aws_guardduty")["ec2_finding"], "severity": score}
     assert mapping.convert(finding)["severity_id"] == severity
+
+
+def auth0_event(code, **fields):
+    return {"log_id": "log-1", "data": {
+        "date": "2026-03-04T05:06:07.000Z", "type": code, "ip": "203.0.113.10",
+        "user_agent": "Mozilla/5.0", "client_id": "client-1", "client_name": "Portal",
+        "user_id": "auth0|abc", "user_name": "alice@example.com", "description": "Something",
+        **fields,
+    }}
+
+@pytest.mark.parametrize("code, class_uid, activity, status", [
+    ("s", 3002, 1, 1),
+    ("f", 3002, 1, 2),
+    ("fp", 3002, 1, 2),
+    ("slo", 3002, 2, 1),
+    ("seacft", 3002, 99, 1),
+    ("ferrt", 3002, 99, 2),
+    ("gd_auth_succeed", 3002, 99, 1),
+    ("gd_auth_failed", 3002, 99, 2),
+    ("ss", 3007, 1, 1),
+    ("fs", 3007, 1, 2),
+    ("sdu", 3007, 3, 1),
+    ("scp", 3007, 8, 1),
+    ("scpr", 3007, 9, 1),
+    ("ublkdu", 3007, 7, 1),
+    ("gd_enrollment_complete", 3007, 12, 1),
+    ("gd_unenroll", 3007, 13, 1),
+    ("sce", 3007, 2, 1),
+])
+def test_auth0_codes(code, class_uid, activity, status):
+    event = Mapping.builtin("auth0", on_invalid="raise").convert(auth0_event(code))
+    assert event["class_uid"] == class_uid
+    assert event["activity_id"] == activity
+    assert event["status_id"] == status
+    assert event["metadata"]["event_code"] == code
+    assert event["metadata"]["uid"] == "log-1"
+    assert event["src_endpoint"]["ip"] == "203.0.113.10"
+    assert event["time"] == 1772600767000
+
+@pytest.mark.parametrize("method, activity", [
+    ("get", 2), ("POST", 1), ("patch", 3), ("put", 3), ("delete", 4), ("OPTIONS", 0),
+])
+def test_auth0_api_activity_comes_from_the_method(method, activity):
+    log = auth0_event("sapi", details={"request": {"method": method, "path": "/api/v2/users"}})
+    event = Mapping.builtin("auth0", on_invalid="raise").convert(log)
+    assert event["class_uid"] == 6003
+    assert event["activity_id"] == activity
+    assert event["api"]["operation"] == "Something"
+
+def test_auth0_failed_api_call():
+    event = Mapping.builtin("auth0", on_invalid="raise").convert(auth0_event("fapi"))
+    assert event["status_id"] == 2
+
+@pytest.mark.parametrize("code, severity", [("limit_wc", 3), ("limit_mu", 3), ("pwd_leak", 4)])
+def test_auth0_detections(code, severity):
+    event = Mapping.builtin("auth0", on_invalid="raise").convert(auth0_event(code))
+    assert event["class_uid"] == 2004
+    assert event["severity_id"] == severity
+    assert event["finding_info"]["uid"] == "log-1"
+    assert event["evidences"][0]["src_endpoint"]["ip"] == "203.0.113.10"
+
+@pytest.mark.parametrize("code", ["sys_os_update_start", "gd_send_sms", "fn", "brand_new_code"])
+def test_auth0_noise_has_no_route(code):
+    with pytest.raises(NoRouteError):
+        Mapping.builtin("auth0").convert(auth0_event(code))
+
+def test_auth0_without_the_log_stream_wrapper():
+    event = Mapping.builtin("auth0", on_invalid="raise").convert(auth0_event("s")["data"] | {"log_id": "log-2"})
+    assert event["metadata"]["uid"] == "log-2"
+
+def test_auth0_keeps_user_id_without_inventing_a_name():
+    log = auth0_event("sapi", user_name="", client_name="")
+    event = Mapping.builtin("auth0", on_invalid="raise").convert(log)
+    assert event["actor"]["user"] == {"uid": "auth0|abc"}
+
+def test_auth0_with_no_identity_at_all():
+    log = auth0_event("f", user_name="", client_name="", user_id="")
+    event = Mapping.builtin("auth0", on_invalid="raise").convert(log)
+    assert event["user"] == {"name": "unknown"}
+
+def test_auth0_email_only_when_user_name_is_one():
+    mapping = Mapping.builtin("auth0", on_invalid="raise")
+    assert mapping.convert(auth0_event("s"))["user"]["email_addr"] == "alice@example.com"
+    assert "email_addr" not in mapping.convert(auth0_event("s", user_name="alice"))["user"]
+
+def test_auth0_bad_date_fails():
+    with pytest.raises(ValueError, match="remap failure"):
+        Mapping.builtin("auth0").convert(auth0_event("s", date="soon"))
+
+
+def azure_signin(category="SignInLogs", error_code=0, **properties):
+    return {
+        "time": "2026-03-04T05:06:07.1234567Z", "category": category, "tenantId": "tenant-1",
+        "correlationId": "corr-1", "operationName": "Sign-in activity", "resultType": str(error_code),
+        "properties": {
+            "id": "signin-1", "ipAddress": "203.0.113.10", "status": {"errorCode": error_code},
+            "userPrincipalName": "alice@example.com", "userId": "user-1", "appId": "app-1",
+            "appDisplayName": "Portal", "resourceDisplayName": "Microsoft Graph", "resourceId": "res-1",
+            "isInteractive": True, "authenticationProtocol": "none",
+            "location": {"city": "Paris", "state": "Ile-de-France", "countryOrRegion": "FR"},
+            **properties,
+        },
+    }
+
+def test_azure_signin_success():
+    event = Mapping.builtin("azure_signin", on_invalid="raise").convert(azure_signin())
+    assert event["class_uid"] == 3002
+    assert event["status_id"] == 1
+    assert event["time"] == 1772600767123
+    assert event["user"]["name"] == "alice@example.com"
+    assert event["user"]["uid"] == "user-1"
+    assert event["user"]["type_id"] == 1
+    assert event["service"] == {"name": "Microsoft Graph", "uid": "res-1"}
+    assert event["src_endpoint"]["location"]["country"] == "FR"
+    assert event["metadata"]["correlation_uid"] == "corr-1"
+    assert event["logon_type_id"] == 2
+
+@pytest.mark.parametrize("code, status_id", [
+    (0, 1), (50126, 2), (50053, 2), (7000215, 2), (50140, 99), (50074, 99), (50076, 99),
+])
+def test_azure_signin_outcomes(code, status_id):
+    event = Mapping.builtin("azure_signin", on_invalid="raise").convert(azure_signin(error_code=code))
+    assert event["status_id"] == status_id
+    assert event["status_code"] == str(code)
+
+def test_azure_signin_interrupted_is_named():
+    event = Mapping.builtin("azure_signin", on_invalid="raise").convert(azure_signin(error_code=50140))
+    assert event["status"] == "Interrupted"
+
+@pytest.mark.parametrize("category", ["ServicePrincipalSignInLogs", "ManagedIdentitySignInLogs"])
+def test_azure_signin_without_a_user(category):
+    log = azure_signin(category, userPrincipalName="", userId=None, servicePrincipalName="deploy-bot",
+                       servicePrincipalId="sp-1", ipAddress="", isInteractive=False)
+    event = Mapping.builtin("azure_signin", on_invalid="raise").convert(log)
+    assert event["user"]["name"] == "deploy-bot"
+    assert event["user"]["uid"] == "sp-1"
+    assert event["user"]["type_id"] == 4
+    assert event["logon_type_id"] == 99
+    assert "ip" not in event.get("src_endpoint", {})
+
+@pytest.mark.parametrize("risk, severity", [("high", 4), ("medium", 3), ("low", 2), ("none", 1)])
+def test_azure_signin_severity_follows_risk(risk, severity):
+    log = azure_signin(riskLevelDuringSignIn=risk)
+    assert Mapping.builtin("azure_signin", on_invalid="raise").convert(log)["severity_id"] == severity
+
+@pytest.mark.parametrize("protocol, protocol_id", [
+    ("oAuth2", 6), ("ropc", 6), ("deviceCode", 6), ("saml20", 5), ("wsFederation", 99), ("none", 0),
+])
+def test_azure_signin_protocols(protocol, protocol_id):
+    log = azure_signin(authenticationProtocol=protocol)
+    event = Mapping.builtin("azure_signin", on_invalid="raise").convert(log)
+    assert event["auth_protocol_id"] == protocol_id
+
+def test_azure_signin_device():
+    log = azure_signin(deviceDetail={"deviceId": "dev-1", "displayName": "LAPTOP", "isCompliant": True,
+                                     "isManaged": False})
+    device = Mapping.builtin("azure_signin", on_invalid="raise").convert(log)["device"]
+    assert device == {"type_id": 0, "uid": "dev-1", "name": "LAPTOP", "is_compliant": True,
+                      "is_managed": False}
+
+def test_azure_signin_empty_device_is_dropped():
+    log = azure_signin(deviceDetail={"deviceId": "", "displayName": ""})
+    assert "device" not in Mapping.builtin("azure_signin", on_invalid="raise").convert(log)
+
+def test_azure_signin_mfa_only_when_stated():
+    mapping = Mapping.builtin("azure_signin", on_invalid="raise")
+    assert "is_mfa" not in mapping.convert(azure_signin())
+    required = azure_signin(authenticationRequirement="multiFactorAuthentication")
+    assert mapping.convert(required)["is_mfa"] is True
+    single = azure_signin(authenticationRequirement="singleFactorAuthentication")
+    assert mapping.convert(single)["is_mfa"] is False
+
+def test_azure_signin_lowercase_export_keys():
+    log = azure_signin(ipAddress="")
+    del log["correlationId"]
+    log.update(calleripaddress="203.0.113.20", correlationid="corr-2")
+    event = Mapping.builtin("azure_signin", on_invalid="raise").convert(log)
+    assert event["src_endpoint"]["ip"] == "203.0.113.20"
+    assert event["metadata"]["correlation_uid"] == "corr-2"
+
+@pytest.mark.parametrize("log", [
+    {"category": "AuditLogs", "properties": {}, "time": "2026-03-04T05:06:07Z"},
+    {"category": "SignInLogs", "time": "2026-03-04T05:06:07Z"},
+    {},
+])
+def test_azure_signin_other_logs_have_no_route(log):
+    with pytest.raises(NoRouteError):
+        Mapping.builtin("azure_signin").convert(log)
+
+@pytest.mark.parametrize("value, expected", [
+    ("2026-03-04T05:06:07Z", 1772600767000),
+    ("2026-03-04 05:06:07.123", 1772600767123),
+    ("3/4/2026 5:06:07 AM", 1772600767000),
+])
+def test_azure_signin_time_formats(value, expected):
+    log = {**azure_signin(), "time": value}
+    assert Mapping.builtin("azure_signin", on_invalid="raise").convert(log)["time"] == expected
+
+def test_azure_signin_bad_time_fails():
+    with pytest.raises(ValueError, match="remap failure"):
+        Mapping.builtin("azure_signin").convert({**azure_signin(), "time": "soon"})
+
+ZONELESS_DATE_PROGRAM = """
+from pyvrl.ocsf import Mapping
+log = {"date": "2026-03-04 05:06:07.000000000", "type": "s", "log_id": "x", "user_id": "u", "ip": "203.0.113.10"}
+print(Mapping.builtin("auth0").convert(log)["time"])
+azure = {"time": "2026-03-04 05:06:07.000", "category": "SignInLogs", "properties": {"userId": "u"}}
+print(Mapping.builtin("azure_signin").convert(azure)["time"])
+"""
+
+@pytest.mark.parametrize("zone", ["UTC", "Asia/Tokyo", "America/New_York"])
+def test_dates_without_a_zone_are_utc_on_any_server(zone):
+    result = subprocess.run([sys.executable, "-c", ZONELESS_DATE_PROGRAM], capture_output=True,
+                            text=True, check=True, env={**os.environ, "TZ": zone})
+    assert result.stdout.split() == ["1772600767000", "1772600767000"]
 
 
 # Editor schema
