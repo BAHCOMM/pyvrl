@@ -32,8 +32,27 @@ const COMPILE_STACK: usize = 64 * 1024 * 1024;
 /// source length, so scaling by length keeps that drop on the stack.
 const STACK_PER_SOURCE_BYTE: usize = 1024;
 
+/// Functions that reach beyond the event: the network, the environment, the
+/// host name, or files named by the program. They are unavailable unless the
+/// caller trusts the program, so untrusted VRL can only transform its input.
+///
+/// Check this list when upgrading vrl, because new functions are available by
+/// default.
+pub const HOST_FUNCTIONS: &[&str] = &[
+    "dns_lookup",
+    "encode_proto",
+    "get_env_var",
+    "get_hostname",
+    "http_request",
+    "parse_etld",
+    "parse_groks",
+    "parse_proto",
+    "reverse_dns",
+    "validate_json_schema",
+];
+
 /// Compiles `source`, returning a printable error if it is invalid or too deep.
-pub fn compile_checked(source: &str) -> Result<Program, String> {
+pub fn compile_checked(source: &str, allow_host_access: bool) -> Result<Program, String> {
     let stack_size = source
         .len()
         .saturating_mul(STACK_PER_SOURCE_BYTE)
@@ -42,14 +61,14 @@ pub fn compile_checked(source: &str) -> Result<Program, String> {
     thread::scope(|scope| {
         thread::Builder::new()
             .stack_size(stack_size)
-            .spawn_scoped(scope, || compile_on_this_thread(source))
+            .spawn_scoped(scope, || compile_on_this_thread(source, allow_host_access))
             .map_err(|e| format!("unable to compile program: {e}"))?
             .join()
             .unwrap_or_else(|payload| panic::resume_unwind(payload))
     })
 }
 
-fn compile_on_this_thread(source: &str) -> Result<Program, String> {
+fn compile_on_this_thread(source: &str, allow_host_access: bool) -> Result<Program, String> {
     // A parse failure falls through so compile() reports it as a diagnostic.
     if let Ok(ast) = parser::parse(source) {
         let depth = consume_and_measure(ast);
@@ -60,7 +79,10 @@ fn compile_on_this_thread(source: &str) -> Result<Program, String> {
         }
     }
 
-    let fns = vrl::stdlib::all();
+    let mut fns = vrl::stdlib::all();
+    if !allow_host_access {
+        fns.retain(|function| !HOST_FUNCTIONS.contains(&function.identifier()));
+    }
     compile(source, &fns)
         .map(|result| result.program)
         .map_err(|diagnostics| Formatter::new(source, diagnostics).to_string())
