@@ -96,7 +96,7 @@ def compile_mapping(document):
         if "when" not in route and index != len(routes) - 1:
             raise MappingError(f"route {index} has no `when`, so later routes can't match")
     lines += _branch_lines(branches)
-    lines.append(f"compact({OUTPUT}, string: false)")
+    lines.append(f"compact({OUTPUT})")
     return "\n".join(lines) + "\n"
 
 
