@@ -26,9 +26,13 @@ struct Transform {
 #[pymethods]
 impl Transform {
 
+    /// Compiles a VRL program. Functions that reach the network, the
+    /// environment or files are unavailable unless `allow_host_access` is set,
+    /// which is only safe for a program you wrote yourself.
     #[new]
-    fn __new__(source: String) -> PyResult<Self> {
-        let program = program::compile_checked(&source)
+    #[pyo3(signature = (source, *, allow_host_access=false))]
+    fn __new__(source: String, allow_host_access: bool) -> PyResult<Self> {
+        let program = program::compile_checked(&source, allow_host_access)
             .map_err(PyErr::new::<PyValueError, _>)?;
         Ok(Self { source, program })
     }

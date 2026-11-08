@@ -303,3 +303,33 @@ def test_large_event_within_limit_accepted():
 def test_event_past_size_limit_rejected():
     with pytest.raises(ValueError, match="event is too large"):
         run(".", {"a": "x" * (4 * 1024 * 1024 + 1)})
+
+
+HOST_CALLS = {
+    "dns_lookup": 'dns_lookup!("example.com")',
+    "encode_proto": 'encode_proto!({}, "/etc/passwd", "x")',
+    "get_env_var": 'get_env_var!("HOME")',
+    "get_hostname": "get_hostname!()",
+    "http_request": 'http_request!("http://169.254.169.254/")',
+    "parse_etld": 'parse_etld!("a.example.com", psl: "/etc/passwd")',
+    "parse_groks": 'parse_groks!("x", ["%{GREEDYDATA:x}"], alias_sources: ["/etc/passwd"])',
+    "parse_proto": 'parse_proto!("x", "/etc/passwd", "x")',
+    "reverse_dns": 'reverse_dns!("8.8.8.8")',
+    "validate_json_schema": 'validate_json_schema!("{}", "/etc/passwd")',
+}
+
+
+@pytest.mark.parametrize("name", sorted(HOST_CALLS))
+def test_host_functions_are_refused_by_default(name):
+    with pytest.raises(ValueError, match="undefined function"):
+        Transform(f".x = {HOST_CALLS[name]}\n.")
+
+
+def test_a_trusted_program_can_use_host_functions():
+    program = Transform('.x = get_hostname!()\n.', allow_host_access=True)
+    assert program.remap({})["x"]
+
+
+def test_restricted_programs_keep_ordinary_functions():
+    program = Transform('.x = upcase!(.x)\n.y = parse_json!(.j)\n.')
+    assert program.remap({"x": "a", "j": "{}"}) == {"x": "A", "j": "{}", "y": {}}

@@ -27,6 +27,12 @@ Apply the program to data with the object's `remap` function
 {'x': 'FOO', 'y': 'bar', 'z': '018f79d0-812b-7f90-bc74-85042e23db44'}
 ```
 
+## Untrusted programs
+
+A program can only transform its input. Functions that reach the network, the environment, the host name or files named by the program aren't available: `dns_lookup`, `encode_proto`, `get_env_var`, `get_hostname`, `http_request`, `parse_etld`, `parse_groks`, `parse_proto`, `reverse_dns` and `validate_json_schema`. Using one fails when the program compiles.
+
+For a program you wrote yourself, pass `Transform(program, allow_host_access=True)`.
+
 ## Converting logs to OCSF
 
 `pyvrl.ocsf` converts logs to [OCSF](https://schema.ocsf.io) 1.9.0 using YAML mappings. These are built in: `auth0`, `aws_cloudtrail`, `aws_guardduty`, `aws_vpc_flow` and `azure_signin`.
