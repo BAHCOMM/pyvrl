@@ -708,3 +708,71 @@ def test_cli_writes_the_committed_schema(tmp_path):
 def test_cli_rejects_bad_arguments(capsys):
     assert main([]) == 2
     assert "schema FILE" in capsys.readouterr().err
+
+
+def test_base_event_is_uncategorized():
+    """Base Event (class 0) has no category in the schema; OCSF's category
+    0 is Uncategorized. A catch-all route converts to it."""
+    from pyvrl.ocsf import Mapping
+
+    m = Mapping(
+        {
+            "source": "any",
+            "routes": [
+                {
+                    "class": "base_event",
+                    "fields": {
+                        "activity_id": 0,
+                        "severity_id": 1,
+                        "time": 1700000000000,
+                        "message": ".kind",
+                        "metadata": {"product": {"name": '"p"'}},
+                        "unmapped": ".",
+                    },
+                }
+            ],
+        },
+        on_invalid="raise",
+    )
+    out = m.convert({"kind": "Heartbeat", "x": "1"})
+    assert out["class_uid"] == 0 and out["class_name"] == "Base Event"
+    assert out["category_uid"] == 0 and out["category_name"] == "Uncategorized"
+    assert out["type_uid"] == 0
+    assert out["message"] == "Heartbeat" and out["unmapped"]["x"] == "1"
+
+
+def test_a_value_of_several_statements_is_its_last_statement():
+    """A field or let written as several statements (separated by `;` or new
+    lines) takes the value of the last one, not of the first assignment."""
+    from pyvrl.ocsf import Mapping
+
+    m = Mapping(
+        {
+            "source": "any",
+            "let": {"who": 'n = string(.user) ?? ""; if n == "" { "nobody" } else { n }'},
+            "routes": [
+                {
+                    "class": "base_event",
+                    "fields": {
+                        "activity_id": 0,
+                        "severity_id": 1,
+                        "time": 1700000000000,
+                        "message": "who",
+                        "metadata": {"product": {"name": '"p"'}},
+                        # Strings, raw strings, regexes and brackets holding
+                        # ; or a new line do not split the value.
+                        "unmapped": (
+                            'a = {"k": "x;y"}\nb = s\'\\d;\\n\'\n'
+                            'c = replace("a;b", r\'[;\\n]\', "-")\n'
+                            '{"a": a.k, "b": b, "c": c, "d": "}"}'
+                        ),
+                    },
+                }
+            ],
+        },
+        on_invalid="raise",
+    )
+    out = m.convert({})
+    assert out["message"] == "nobody"
+    assert out["unmapped"] == {"a": "x;y", "b": "\\d;\\n", "c": "a-b", "d": "}"}
+    assert m.convert({"user": "ann"})["message"] == "ann"

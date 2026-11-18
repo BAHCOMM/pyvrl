@@ -88,7 +88,7 @@ def compile_mapping(document):
 
     lines = [f"{OUTPUT} = {{}}"]
     for name, expression in (document.get("let") or {}).items():
-        lines.append(f"{name} = {expression}")
+        lines.append(f"{name} = {_expression(expression)}")
 
     branches = []
     for index, route in enumerate(routes):
@@ -98,6 +98,44 @@ def compile_mapping(document):
     lines += _branch_lines(branches)
     lines.append(f"compact({OUTPUT})")
     return "\n".join(lines) + "\n"
+
+
+def _expression(text):
+    """``text`` as one expression. A value written as several statements
+    (separated by ``;`` or new lines) becomes a block whose value is its last
+    statement's; assigned bare, only the first statement would be the value."""
+    if not isinstance(text, str) or not _several_statements(text):
+        return text
+    return f"if true {{\n{text}\n}}"
+
+
+def _several_statements(text):
+    """Whether ``text`` has a ``;`` or new line outside strings, comments and
+    brackets."""
+    depth = 0
+    i = 0
+    while i < len(text):
+        c = text[i]
+        if c == '"':
+            i += 1
+            while i < len(text) and text[i] != '"':
+                i += 2 if text[i] == "\\" else 1
+        elif c in "rs" and text[i + 1:i + 2] == "'" and (i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_")):
+            i += 2
+            while i < len(text) and text[i] != "'":
+                i += 2 if text[i] == "\\" else 1
+        elif c == "#":
+            while i < len(text) and text[i] != "\n":
+                i += 1
+            continue
+        elif c in "({[":
+            depth += 1
+        elif c in ")}]":
+            depth -= 1
+        elif c in ";\n" and depth == 0 and text[i + 1:].strip():
+            return True
+        i += 1
+    return False
 
 
 def _branch_lines(branches):
@@ -150,7 +188,9 @@ def _with_generated_fields(route, entity, profiles):
     fields["class_uid"] = entity["uid"]
     fields["class_name"] = json.dumps(entity["caption"])
     fields["category_uid"] = entity["category_uid"]
-    fields["category_name"] = json.dumps(entity["category_name"])
+    # Base Event (class 0) belongs to no category; OCSF's category 0 is
+    # Uncategorized.
+    fields["category_name"] = json.dumps(entity.get("category_name", "Uncategorized"))
     # `get` hides the field's type from VRL, which otherwise rejects `??` when
     # activity_id is a literal, because that can't fail.
     activity = f'(get({OUTPUT}, ["activity_id"]) ?? 0)'
@@ -194,7 +234,7 @@ def _emit_value(value, attribute, profiles, target, where, lines):
         for index, item in enumerate(value):
             _emit_value(item, single, profiles, f"{target}[{index}]", f"{where}[{index}]", lines)
     elif isinstance(value, str):
-        lines.append(f"{target} = {value}")
+        lines.append(f"{target} = {_expression(value)}")
     else:
         if "enum" in attribute and str(value) not in attribute["enum"]:
             raise MappingError(f"{where}: invalid value {value!r}")
